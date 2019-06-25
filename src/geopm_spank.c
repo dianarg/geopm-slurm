@@ -30,10 +30,10 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "limits.h"
-#include "math.h"
+#include <limits.h>
+#include <math.h>
 
-#include "slurm/spank.h"
+#include <slurm/spank.h>
 
 #include "geopm_agent.h"
 #include "geopm_pio.h"
