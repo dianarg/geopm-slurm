@@ -52,6 +52,8 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv);
 
 static size_t g_profile_size;
 static char g_profile[NAME_MAX];
+static size_t g_agent_size;
+static char g_agent[NAME_MAX];
 static int g_remote;
 
 /* callback to save profile string */
@@ -61,7 +63,22 @@ static int set_policy_for_profile(int val, const char *optarg, int remote)
     if (optarg) {
         slurm_info("profile name is %s, remote: %d", optarg, remote);
         g_profile_size = strlen(optarg);
-        strncpy(g_profile, optarg, NAME_MAX-1);
+        strncpy(g_profile, optarg, NAME_MAX - 1);
+    }
+    else {
+        slurm_info("callback triggered but optarg was null");
+    }
+    return 0;
+}
+
+/* callback to save agent */
+static int set_agent_for_profile(int val, const char *optarg, int remote)
+{
+    //g_remote = remote;
+    if (optarg) {
+        slurm_info("agent name is %s, remote: %d", optarg, remote);
+        g_agent_size = strlen(optarg);
+        strncpy(g_agent, optarg, NAME_MAX - 1);
     }
     else {
         slurm_info("callback triggered but optarg was null");
@@ -80,6 +97,15 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
         0, /* val */
         (spank_opt_cb_f)set_policy_for_profile  /* callback */
     };
+    struct spank_option agent_option =
+    {
+        "geopm-agent",  /* name */
+        "GEOPM agent name",  /* arginfo */
+        "If matching profile is found, sets custom GEOPM policy for the job", /* usage */
+        1, /* has_arg; 1 = requires argument */
+        0, /* val */
+        (spank_opt_cb_f)set_agent_for_profile  /* callback */
+    };
 
     uint32_t job_id;
     uint32_t step_id;
@@ -92,10 +118,17 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
     slurm_info("spank_init: Job: %d, Job step: %d, user: %d", job_id, step_id, user_id);
     g_profile_size = 0;
     memset(g_profile, 0, NAME_MAX);
+    g_agent_size = 0;
+    memset(g_agent, 0, NAME_MAX);
     g_remote = 0;
     int err = spank_option_register(spank_ctx, &profile_option);
     if (err != ESPANK_SUCCESS) {
-        slurm_info("Failed to register option.");
+        slurm_info("Failed to register profile option.");
+        return err;
+    }
+    err = spank_option_register(spank_ctx, &agent_option);
+    if (err != ESPANK_SUCCESS) {
+        slurm_info("Failed to register agent option.");
         return err;
     }
     return 0;
@@ -119,22 +152,32 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
 
     if (g_profile_size == 0) {
         /* no profile provided; geopm_manager_get_best_policy will provide a default */
+        /* todo: not working because remote was not set by the callback */
         g_profile[0] = '\0';
     }
-    if (!g_remote) {
-        /* head node decides policy */
-        /* todo: move get_best_policy() here and put policy in environment */
+    else if (g_profile_size > 0 && g_agent_size == 0) {
+        slurm_info("Error: --geopm-agent option must be provided if --geopm-profile is used.");
+        return -1;
+    }
+    else {
+        /* agent must match environment override */
+        char agent[NAME_MAX];
+        geopm_env_agent(NAME_MAX, agent);
+        if (strncmp(g_agent, agent, NAME_MAX) != 0) {
+            slurm_info("Error: --geopm-agent option must match override.");
+            return -1;
+        }
     }
     if (g_remote) {
-        /* todo: get policy from environment */
-        char agent[NAME_MAX];
-        char policy_json[NAME_MAX];
         /* Note: this path should match the GEOPM_POLICY setting in
          * /etc/geopm/environment-*.json.
          */
         const char *policy_path = "/etc/geopm/node_policy.json";
-        geopm_env_agent(NAME_MAX, agent);
-        geopm_manager_get_best_policy(g_profile, agent, NAME_MAX, policy_json);
+
+        char policy_json[NAME_MAX];
+        /* geopm_policystore_get_best() */
+        geopm_manager_get_best_policy(g_profile, g_agent, NAME_MAX, policy_json);
+        /* geopm_daemon_set_policy() */
         geopm_manager_set_host_policy(hostname, policy_path, policy_json);
     }
     return 0;
