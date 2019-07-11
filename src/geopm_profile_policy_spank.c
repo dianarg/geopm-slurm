@@ -42,7 +42,10 @@
 #include "geopm_agent.h"
 #include "geopm_pio.h"
 #include "geopm_error.h"
+#include "geopm_policystore.h"
+//#include "geopm_daemon.h"
 #include "geopm_manager.h"
+#include "geopm_agent.h"
 #include "config.h"
 
 SPANK_PLUGIN(geopm_profile_policy, 1);
@@ -54,12 +57,10 @@ static size_t g_profile_size;
 static char g_profile[NAME_MAX];
 static size_t g_agent_size;
 static char g_agent[NAME_MAX];
-static int g_remote;
 
 /* callback to save profile string */
 static int set_policy_for_profile(int val, const char *optarg, int remote)
 {
-    g_remote = remote;
     if (optarg) {
         slurm_info("profile name is %s, remote: %d", optarg, remote);
         g_profile_size = strlen(optarg);
@@ -74,7 +75,6 @@ static int set_policy_for_profile(int val, const char *optarg, int remote)
 /* callback to save agent */
 static int set_agent_for_profile(int val, const char *optarg, int remote)
 {
-    //g_remote = remote;
     if (optarg) {
         slurm_info("agent name is %s, remote: %d", optarg, remote);
         g_agent_size = strlen(optarg);
@@ -120,7 +120,6 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
     memset(g_profile, 0, NAME_MAX);
     g_agent_size = 0;
     memset(g_agent, 0, NAME_MAX);
-    g_remote = 0;
     int err = spank_option_register(spank_ctx, &profile_option);
     if (err != ESPANK_SUCCESS) {
         slurm_info("Failed to register profile option.");
@@ -131,33 +130,34 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
         slurm_info("Failed to register agent option.");
         return err;
     }
-    return 0;
+    return ESPANK_SUCCESS;
 }
 
 int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
 {
+    /* only activate in remote context */
+    if (spank_remote(spank_ctx) != 1) {
+        return ESPANK_SUCCESS;
+    }
+
     uint32_t job_id;
     uint32_t step_id;
     uid_t user_id;
     spank_get_item(spank_ctx, S_JOB_ID, &job_id);
     spank_get_item(spank_ctx, S_JOB_STEPID, &step_id);
     spank_get_item(spank_ctx, S_JOB_UID, &user_id);
-
     slurm_info("Loaded geopm_profile_policy plugin: spank_init_post_opt");
     slurm_info("spank_init_post_opt: Job: %d, Job step: %d, user: %d", job_id, step_id, user_id);
 
-    /* todo: check error return codes */
-    char hostname[NAME_MAX];
-    gethostname(hostname, NAME_MAX);
+    int err = 0;
 
     if (g_profile_size == 0) {
         /* no profile provided; geopm_manager_get_best_policy will provide a default */
-        /* todo: not working because remote was not set by the callback */
-        g_profile[0] = '\0';
+        geopm_env_agent(NAME_MAX, g_agent);
     }
     else if (g_profile_size > 0 && g_agent_size == 0) {
         slurm_info("Error: --geopm-agent option must be provided if --geopm-profile is used.");
-        return -1;
+        return ESPANK_BAD_ARG;
     }
     else {
         /* agent must match environment override */
@@ -165,20 +165,59 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
         geopm_env_agent(NAME_MAX, agent);
         if (strncmp(g_agent, agent, NAME_MAX) != 0) {
             slurm_info("Error: --geopm-agent option must match override.");
-            return -1;
+            return ESPANK_BAD_ARG;
         }
     }
-    if (g_remote) {
-        /* Note: this path should match the GEOPM_POLICY setting in
-         * /etc/geopm/environment-*.json.
-         */
-        const char *policy_path = "/etc/geopm/node_policy.json";
 
-        char policy_json[NAME_MAX];
-        /* geopm_policystore_get_best() */
-        geopm_manager_get_best_policy(g_profile, g_agent, NAME_MAX, policy_json);
-        /* geopm_daemon_set_policy() */
-        geopm_manager_set_host_policy(hostname, policy_path, policy_json);
+    int num_policy = 0;
+    err = geopm_agent_num_policy(g_agent, &num_policy);
+    if (err) {
+        slurm_info("geopm_agent_num_policy(%s, _) failed", g_agent);
+        return ESPANK_ERROR;
     }
+
+    const char *policy_db = "/home/drguttma/policystore.db";
+    err = geopm_policystore_connect(policy_db);
+    if (err) {
+        slurm_info("geopm_policystore_connect(%s) failed", policy_db);
+        return ESPANK_ERROR;
+    }
+
+    double *policy_vals = (double*)malloc(num_policy * sizeof(double));
+    if (!policy_vals) {
+        slurm_info("malloc() failed", g_agent);
+        return ESPANK_ERROR;
+    }
+    err = geopm_policystore_get_best(g_profile, g_agent, num_policy, policy_vals);
+    if (err) {
+        slurm_info("geopm_policystore_get_best(%s, %s, %d, _) failed with error %d", g_profile, g_agent, num_policy, err);
+        return ESPANK_ERROR;
+    }
+
+    err = geopm_policystore_disconnect();
+    if (err) {
+        slurm_info("geopm_policystore_disconnect() failed");
+        return ESPANK_ERROR;
+    }
+
+    char policy_json[NAME_MAX];
+    err = geopm_agent_policy_json(g_agent, policy_vals, NAME_MAX, policy_json);
+    if (err) {
+        slurm_info("geopm_agent_policy_json(%s, %s, %d, _) failed", g_agent, policy_vals, NAME_MAX);
+        return ESPANK_ERROR;
+    }
+
+    /* Note: this path should match the GEOPM_POLICY setting in
+     * /etc/geopm/environment-*.json.
+     */
+    const char *policy_path = "/etc/geopm/node_policy.json";
+    char hostname[NAME_MAX];
+    gethostname(hostname, NAME_MAX);
+    err = geopm_manager_set_host_policy(hostname, policy_path, policy_json);
+    if (err) {
+        slurm_info("geopm_daemon_set_policy(%s, %s, %s) failed", hostname, policy_path, policy_json);
+        return ESPANK_ERROR;
+    }
+
     return 0;
 }
