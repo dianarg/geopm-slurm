@@ -44,8 +44,7 @@
 #include "geopm_pio.h"
 #include "geopm_error.h"
 #include "geopm_policystore.h"
-//#include "geopm_daemon.h"
-#include "geopm_manager.h"
+#include "geopm_daemon.h"
 #include "geopm_agent.h"
 #include "config.h"
 
@@ -156,7 +155,7 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
 
     if (g_profile_size == 0) {
         /* no profile provided; geopm_manager_get_best_policy will provide a default */
-        geopm_env_agent(NAME_MAX, g_agent);
+        geopm_daemon_get_env_agent(NAME_MAX, g_agent);
     }
     else if (g_profile_size > 0 && g_agent_size == 0) {
         slurm_info("Error: --geopm-agent option must be provided if --geopm-profile is used.");
@@ -165,7 +164,7 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
     else {
         /* agent must match environment override */
         char agent[NAME_MAX];
-        geopm_env_agent(NAME_MAX, agent);
+        geopm_daemon_get_env_agent(NAME_MAX, agent);
         if (strncmp(g_agent, agent, NAME_MAX) != 0) {
             slurm_info("Error: --geopm-agent option must match override.");
             return ESPANK_BAD_ARG;
@@ -219,7 +218,7 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
     const char *policy_path = "/etc/geopm/node_policy.json";
     char hostname[NAME_MAX];
     gethostname(hostname, NAME_MAX);
-    err = geopm_manager_set_host_policy(hostname, policy_path, policy_json);
+    err = geopm_daemon_set_host_policy(hostname, policy_path, policy_json);
     if (err) {
         slurm_info("geopm_daemon_set_policy(%s, %s, %s) failed", hostname, policy_path, policy_json);
         return ESPANK_ERROR;
