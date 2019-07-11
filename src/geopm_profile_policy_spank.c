@@ -36,6 +36,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <pwd.h>
 
 #include <slurm/spank.h>
 
@@ -146,8 +147,10 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
     spank_get_item(spank_ctx, S_JOB_ID, &job_id);
     spank_get_item(spank_ctx, S_JOB_STEPID, &step_id);
     spank_get_item(spank_ctx, S_JOB_UID, &user_id);
+    struct passwd *pwd = getpwuid(user_id);
+    const char *username = pwd->pw_name;
     slurm_info("Loaded geopm_profile_policy plugin: spank_init_post_opt");
-    slurm_info("spank_init_post_opt: Job: %d, Job step: %d, user: %d", job_id, step_id, user_id);
+    slurm_info("spank_init_post_opt: Job: %d, Job step: %d, user: %d, username: %s", job_id, step_id, user_id, username);
 
     int err = 0;
 
@@ -176,7 +179,10 @@ int slurm_spank_init_post_opt(spank_t spank_ctx, int argc, char **argv)
         return ESPANK_ERROR;
     }
 
-    const char *policy_db = "/home/drguttma/policystore.db";
+    const char *user_home = pwd->pw_dir;
+    char policy_db[NAME_MAX];
+    strncpy(policy_db, user_home, NAME_MAX);
+    strncat(policy_db, "/policystore.db", NAME_MAX - strnlen(user_home, NAME_MAX));
     err = geopm_policystore_connect(policy_db);
     if (err) {
         slurm_info("geopm_policystore_connect(%s) failed", policy_db);
