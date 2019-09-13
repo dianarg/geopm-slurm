@@ -93,7 +93,7 @@ int get_agent_profile_attached(struct geopm_endpoint_c *endpoint, size_t agent_s
         err = geopm_endpoint_agent(endpoint, GEOPM_ENDPOINT_AGENT_NAME_MAX, agent);
     }
     if (err) {
-        slurm_info("geopm_endpoint_agent() failed.");
+        slurm_info("geopm_endpoint_agent() failed: %d", err);
     }
     if (!err) {
         err = geopm_endpoint_profile_name(endpoint, GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
@@ -136,6 +136,7 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
 
     memset(agent, 0, GEOPM_ENDPOINT_AGENT_NAME_MAX);
 
+    slurm_info("creating endoint");
     err = geopm_endpoint_create("/geopm_endpoint_test", &endpoint);
     if (err) {
         slurm_info("geopm_endpoint_create() failed");
@@ -148,13 +149,15 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
         slurm_info("geopm_endpoint_open() failed.");
     }
 
+    slurm_info("wait for GEOPM controller attach");
     err = get_agent_profile_attached(endpoint,
                                      GEOPM_ENDPOINT_AGENT_NAME_MAX, agent,
                                      GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
 
+    slurm_info("get policy");
     // allocate array for policy
     if (!err) {
-        err = geopm_agent_num_policy(agent, num_policy);
+        err = geopm_agent_num_policy(agent, &num_policy);
     }
     if (err) {
         slurm_info("geopm_agent_num_policy(%s, _) failed", agent);
@@ -173,6 +176,7 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
         err = get_user_profile_policy(user_id, agent, profile, num_policy, policy_vals);
     }
 
+    slurm_info("write_policy");
     // write policy
     if (!err) {
         err = geopm_endpoint_write_policy(endpoint, num_policy, policy_vals);
