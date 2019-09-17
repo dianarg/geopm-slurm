@@ -50,7 +50,7 @@
 
 SPANK_PLUGIN(geopm_profile_policy, 1);
 
-int slurm_spank_task_post_fork(spank_t spank_ctx, int argc, char **argv);
+int slurm_spank_init(spank_t spank_ctx, int argc, char **argv);
 
 
 
@@ -86,12 +86,7 @@ int get_user_profile_policy(uid_t user_id, const char *agent, const char* profil
 int get_agent_profile_attached(struct geopm_endpoint_c *endpoint, size_t agent_size, char *agent,
                                size_t profile_size, char *profile)
 {
-    int err = 0;
-    // get agent and profile name of attached controller
-    /// @todo: need a timeout
-    while(!err && strnlen(agent, GEOPM_ENDPOINT_AGENT_NAME_MAX) == 0) {
-        err = geopm_endpoint_agent(endpoint, GEOPM_ENDPOINT_AGENT_NAME_MAX, agent);
-    }
+    int err = geopm_endpoint_agent(endpoint, GEOPM_ENDPOINT_AGENT_NAME_MAX, agent);
     if (err) {
         slurm_info("geopm_endpoint_agent() failed: %d", err);
         return err;
@@ -104,11 +99,10 @@ int get_agent_profile_attached(struct geopm_endpoint_c *endpoint, size_t agent_s
     return err;
 }
 
-int slurm_spank_task_post_fork(spank_t spank_ctx, int argc, char **argv)
+int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
 {
     /* only activate in remote context */
     if (spank_remote(spank_ctx) != 1) {
-        slurm_info("unexpected active in non-remote context");
         return ESPANK_SUCCESS;
     }
 
@@ -138,8 +132,10 @@ int slurm_spank_task_post_fork(spank_t spank_ctx, int argc, char **argv)
 
     memset(agent, 0, GEOPM_ENDPOINT_AGENT_NAME_MAX);
 
-    slurm_info("creating endoint");
-    err = geopm_endpoint_create("/geopm_endpoint_test", &endpoint);
+    const char *endpoint_shmem = "geopm_endpoint_test";
+
+    slurm_info("creating endpoint at %s", endpoint_shmem);
+    err = geopm_endpoint_create(endpoint_shmem, &endpoint);
     if (err) {
         slurm_info("geopm_endpoint_create() failed");
         goto exit1;
@@ -151,10 +147,20 @@ int slurm_spank_task_post_fork(spank_t spank_ctx, int argc, char **argv)
         goto exit2;
     }
 
+    // Timeout is required for srun launches that don't start a GEOPM controller.
     slurm_info("wait for GEOPM controller attach");
-    err = get_agent_profile_attached(endpoint,
-                                     GEOPM_ENDPOINT_AGENT_NAME_MAX, agent,
-                                     GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
+    double time_remaining = 10.0;
+    while (!err && time_remaining > 0.0 && strnlen(agent, GEOPM_ENDPOINT_AGENT_NAME_MAX) == 0) {
+        err = get_agent_profile_attached(endpoint,
+                                         GEOPM_ENDPOINT_AGENT_NAME_MAX, agent,
+                                         GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
+        sleep(1);
+        time_remaining -= 1.0;
+    }
+    if (time_remaining <= 0.0) {
+        slurm_info("Timed out waiting for agent to attach. Endpoint shutting down.");
+        goto exit3;
+    }
     if (err) {
         goto exit3;
     }
