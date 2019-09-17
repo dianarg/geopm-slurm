@@ -50,7 +50,7 @@
 
 SPANK_PLUGIN(geopm_profile_policy, 1);
 
-int slurm_spank_init(spank_t spank_ctx, int argc, char **argv);
+int slurm_spank_task_post_fork(spank_t spank_ctx, int argc, char **argv);
 
 
 
@@ -94,25 +94,27 @@ int get_agent_profile_attached(struct geopm_endpoint_c *endpoint, size_t agent_s
     }
     if (err) {
         slurm_info("geopm_endpoint_agent() failed: %d", err);
+        return err;
     }
-    if (!err) {
-        err = geopm_endpoint_profile_name(endpoint, GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
-    }
+    err = geopm_endpoint_profile_name(endpoint, GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
     if (err) {
         slurm_info("geopm_endpoint_profile_name() failed.");
+        return err;
     }
+    return err;
 }
 
-int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
+int slurm_spank_task_post_fork(spank_t spank_ctx, int argc, char **argv)
 {
     /* only activate in remote context */
     if (spank_remote(spank_ctx) != 1) {
+        slurm_info("unexpected active in non-remote context");
         return ESPANK_SUCCESS;
     }
 
-    ///@todo: get path to policy store from argv.  this is set in args in plugstack.conf
-    /// can also configure the endpoint name there.  that string needs to match what's
-    /// set in environment-override
+    ///@todo: get path to policy store from argv.  this is set in args
+    /// in plugstack.conf can also configure the endpoint name there.
+    /// that string needs to match what's set in environment-override
 
 
     uint32_t job_id;
@@ -140,60 +142,57 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
     err = geopm_endpoint_create("/geopm_endpoint_test", &endpoint);
     if (err) {
         slurm_info("geopm_endpoint_create() failed");
+        goto exit1;
     }
 
-    if (!err) {
-        err = geopm_endpoint_open(endpoint);
-    }
+    err = geopm_endpoint_open(endpoint);
     if (err) {
         slurm_info("geopm_endpoint_open() failed.");
+        goto exit2;
     }
 
     slurm_info("wait for GEOPM controller attach");
     err = get_agent_profile_attached(endpoint,
                                      GEOPM_ENDPOINT_AGENT_NAME_MAX, agent,
                                      GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
+    if (err) {
+        goto exit3;
+    }
 
     slurm_info("get policy");
     // allocate array for policy
-    if (!err) {
-        err = geopm_agent_num_policy(agent, &num_policy);
-    }
+    err = geopm_agent_num_policy(agent, &num_policy);
     if (err) {
         slurm_info("geopm_agent_num_policy(%s, _) failed", agent);
+        goto exit3;
     }
-
-    if (!err) {
-        policy_vals = (double*)malloc(num_policy * sizeof(double));
-    }
+    policy_vals = (double*)malloc(num_policy * sizeof(double));
     if (!policy_vals) {
         slurm_info("malloc() failed");
         err = ESPANK_ERROR;
+        goto exit3;
     }
 
     // look up policy
-    if (!err) {
-        err = get_user_profile_policy(user_id, agent, profile, num_policy, policy_vals);
+    err = get_user_profile_policy(user_id, agent, profile, num_policy, policy_vals);
+    if (err) {
+        goto exit3;
     }
 
     slurm_info("write_policy");
     // write policy
-    if (!err) {
-        err = geopm_endpoint_write_policy(endpoint, num_policy, policy_vals);
-        if (err) {
-            slurm_info("geopm_endpoint_write_policy() failed.");
-        }
+    err = geopm_endpoint_write_policy(endpoint, num_policy, policy_vals);
+    if (err) {
+        slurm_info("geopm_endpoint_write_policy() failed.");
+        goto exit3;
     }
     free(policy_vals);
 
-    err = geopm_endpoint_close(endpoint);
-    if (err) {
-        slurm_info("geopm_endpoint_close() failed");
-    }
-    err = geopm_endpoint_destroy(endpoint);
-    if (err) {
-        slurm_info("geopm_endpoint_destroy() failed");
-    }
+exit3:
+    geopm_endpoint_close(endpoint);
+exit2:
+    geopm_endpoint_destroy(endpoint);
+exit1:
 
     return err;
 }
