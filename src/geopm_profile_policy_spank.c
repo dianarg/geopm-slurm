@@ -37,6 +37,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <pwd.h>
+#include <pthread.h>
 
 #include <slurm/spank.h>
 
@@ -51,21 +52,86 @@
 SPANK_PLUGIN(geopm_profile_policy, 1);
 
 int slurm_spank_init(spank_t spank_ctx, int argc, char **argv);
+int slurm_spank_exit(spank_t spank_ctx, int argc, char **argv);
+
+int get_profile_policy(const char *db_path, const char *agent, const char* profile,
+                       int num_policy, double *policy_vals);
+int get_agent_profile_attached(struct geopm_endpoint_c *endpoint, size_t agent_size, char *agent,
+                               size_t profile_size, char *profile);
+
+// function to run in thread
+void *wait_endpoint_attach_policy(void *args);
+
+static volatile int g_continue;
+static volatile int g_run_app;
+static int g_err;
+static pthread_t g_thread_id;
+static char g_db_path[NAME_MAX];
 
 
+int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
+{
+    /* only activate in remote context */
+    if (spank_remote(spank_ctx) != 1) {
+        return ESPANK_SUCCESS;
+    }
+    uint32_t job_id;
+    uint32_t step_id;
+    uid_t user_id;
+    spank_get_item(spank_ctx, S_JOB_ID, &job_id);
+    spank_get_item(spank_ctx, S_JOB_STEPID, &step_id);
+    spank_get_item(spank_ctx, S_JOB_UID, &user_id);
 
-int get_user_profile_policy(uid_t user_id, const char *agent, const char* profile, int num_policy, double *policy_vals)
+    slurm_info("Loaded geopm_profile_policy plugin");
+    slurm_info("Job: %d, Job step: %d, user: %d", job_id, step_id, user_id);
+
+    ///@todo: get path to policy store from argv.  this is set in args
+    /// in plugstack.conf can also configure the endpoint name there.
+    /// that string needs to match what's set in environment-override
+    if (argc > 1) {
+        strncpy(g_db_path, argv[1], NAME_MAX);
+    }
+    else {
+        strncpy(g_db_path, "/home/drguttma/policystore.db", NAME_MAX);
+        slurm_info("No db_path argument provided, using default: %s", g_db_path);
+    }
+
+    g_continue = 1;
+    g_run_app = 0;
+    int err = pthread_create(&g_thread_id, NULL, wait_endpoint_attach_policy, g_db_path);
+    if (err) {
+        slurm_info("pthread_create() failed.");
+    }
+    while (!err && g_run_app == 0) {
+        // wait for endpoint to create shared memory and lock it
+    }
+    return err;
+}
+
+int slurm_spank_exit(spank_t spank_ctx, int argc, char **argv)
+{
+    /* only activate in remote context */
+    if (spank_remote(spank_ctx) != 1) {
+        return ESPANK_SUCCESS;
+    }
+    g_continue = 0;
+    void *thread_err = NULL;
+    ssize_t err = pthread_join(g_thread_id, &thread_err);
+    if (err) {
+        slurm_info("pthread_join() failed");
+    }
+    else {
+        err = (ssize_t)thread_err;
+    }
+    return err;
+}
+
+int get_profile_policy(const char *db_path, const char *agent, const char* profile, int num_policy, double *policy_vals)
 {
     int err = 0;
-    struct passwd *pwd = getpwuid(user_id);
-    const char *username = pwd->pw_name;
-    const char *user_home = pwd->pw_dir;
-    char policy_db[NAME_MAX];
-    strncpy(policy_db, user_home, NAME_MAX);
-    strncat(policy_db, "/policystore.db", NAME_MAX - strnlen(user_home, NAME_MAX));
-    err = geopm_policystore_connect(policy_db);
+    err = geopm_policystore_connect(db_path);
     if (err) {
-        slurm_info("geopm_policystore_connect(%s) failed", policy_db);
+        slurm_info("geopm_policystore_connect(%s) failed", db_path);
         return ESPANK_ERROR;
     }
 
@@ -99,36 +165,19 @@ int get_agent_profile_attached(struct geopm_endpoint_c *endpoint, size_t agent_s
     return err;
 }
 
-int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
+void *wait_endpoint_attach_policy(void *args)
 {
-    /* only activate in remote context */
-    if (spank_remote(spank_ctx) != 1) {
-        return ESPANK_SUCCESS;
-    }
-
-    ///@todo: get path to policy store from argv.  this is set in args
-    /// in plugstack.conf can also configure the endpoint name there.
-    /// that string needs to match what's set in environment-override
-
-
-    uint32_t job_id;
-    uint32_t step_id;
-    uid_t user_id;
-    spank_get_item(spank_ctx, S_JOB_ID, &job_id);
-    spank_get_item(spank_ctx, S_JOB_STEPID, &step_id);
-    spank_get_item(spank_ctx, S_JOB_UID, &user_id);
-
-    slurm_info("Loaded geopm_profile_policy plugin: spank_init");
-    slurm_info("spank_init: Job: %d, Job step: %d, user: %d", job_id, step_id, user_id);
-
     /// @todo: use geopm_error_message(int err, char *msg, size_t size)
-    int err = 0;
+    ssize_t err = 0;
     // create endpoint and wait for attach
     struct geopm_endpoint_c *endpoint;
     char agent[GEOPM_ENDPOINT_AGENT_NAME_MAX];
     char profile[GEOPM_ENDPOINT_PROFILE_NAME_MAX];
     int num_policy = 0;
     double *policy_vals = NULL;
+    char *db_path = (char *)args;
+
+    slurm_info("using %s", db_path);
 
     memset(agent, 0, GEOPM_ENDPOINT_AGENT_NAME_MAX);
 
@@ -147,10 +196,13 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
         goto exit2;
     }
 
+    g_run_app = 1;
+
     // Timeout is required for srun launches that don't start a GEOPM controller.
     slurm_info("wait for GEOPM controller attach");
-    double time_remaining = 10.0;
-    while (!err && time_remaining > 0.0 && strnlen(agent, GEOPM_ENDPOINT_AGENT_NAME_MAX) == 0) {
+    double time_remaining = 100.0;
+    while (!err && g_continue && time_remaining > 0.0 &&
+           strnlen(agent, GEOPM_ENDPOINT_AGENT_NAME_MAX) == 0) {
         err = get_agent_profile_attached(endpoint,
                                          GEOPM_ENDPOINT_AGENT_NAME_MAX, agent,
                                          GEOPM_ENDPOINT_PROFILE_NAME_MAX, profile);
@@ -161,7 +213,8 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
         slurm_info("Timed out waiting for agent to attach. Endpoint shutting down.");
         goto exit3;
     }
-    if (err) {
+    if (err || !g_continue) {
+        slurm_info("cancel wait for Controller");
         goto exit3;
     }
 
@@ -180,9 +233,9 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
     }
 
     // look up policy
-    err = get_user_profile_policy(user_id, agent, profile, num_policy, policy_vals);
+    err = get_profile_policy(db_path, agent, profile, num_policy, policy_vals);
     if (err) {
-        goto exit3;
+        goto exit4;
     }
 
     slurm_info("write_policy");
@@ -190,15 +243,16 @@ int slurm_spank_init(spank_t spank_ctx, int argc, char **argv)
     err = geopm_endpoint_write_policy(endpoint, num_policy, policy_vals);
     if (err) {
         slurm_info("geopm_endpoint_write_policy() failed.");
-        goto exit3;
+        goto exit4;
     }
+exit4:
     free(policy_vals);
-
 exit3:
     geopm_endpoint_close(endpoint);
+    slurm_info("endpoint closed");
 exit2:
     geopm_endpoint_destroy(endpoint);
 exit1:
 
-    return err;
+    return (void*)err;
 }

@@ -58,7 +58,7 @@ libgeopm_spank_la_SOURCES = src/geopm_spank.c
 libgeopm_profile_policy_spank_la_LDFLAGS = $(AM_LDFLAGS) -version-info $(geopm_spank_abi_version)
 libgeopm_profile_policy_spank_la_LIBADD = -lslurm
 libgeopm_profile_policy_spank_la_SOURCES = src/geopm_profile_policy_spank.c
-
+libgeopm_profile_policy_spank_la_CFLAGS = $(AM_CFLAGS) -pthread
 
 # CLEAN TARGETS
 DISTCLEANFILES = VERSION
